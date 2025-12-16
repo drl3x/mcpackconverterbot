@@ -12,43 +12,30 @@ import asyncio
 # CONFIG
 # =========================
 TOKEN = os.environ.get("TOKEN")
-if not TOKEN:
-    print("❌ TOKEN NOT FOUND (set it in Railway Secrets as TOKEN)")
-    raise SystemExit
-
-GUILD_ID = 1138096902395662436  # Your server ID
+GUILD_ID = 1138096902395662436  # Replace with your server ID
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# =========================
-# GLOBAL TOGGLES
-# =========================
 send_in_dm = False
 private_mode = False
 
-# =========================
-# VERSION DATA
-# =========================
 PACK_FORMATS = {
     "1.8": 1, "1.9": 2, "1.10": 2, "1.11": 3, "1.12": 3,
     "1.13": 4, "1.14": 4, "1.15": 5, "1.16": 6, "1.17": 7,
     "1.18": 8, "1.19": 9, "1.20": 15, "1.21": 18,
 }
-
 VALID_VERSIONS = list(PACK_FORMATS.keys())
 
 FLATTENING_REMAP = {
     "assets/minecraft/textures/blocks": "assets/minecraft/textures/block",
     "assets/minecraft/textures/items": "assets/minecraft/textures/item",
 }
-
 TEXTURE_RENAMES = {
     "grass_side.png": "grass_block_side.png",
     "grass_top.png": "grass_block_top.png",
     "stonebrick.png": "stone_bricks.png",
 }
-
 VERSION_FOLDER_REMAP = {
     "1.21": {
         "assets/minecraft/models/armor": "assets/minecraft/textures/entity/equipment/humanoid",
@@ -67,15 +54,15 @@ def detect_pack_version(path):
     mcmeta_path = os.path.join(path, "pack.mcmeta")
     if not os.path.exists(mcmeta_path):
         return None
-    with open(mcmeta_path, "r", encoding="utf-8") as f:
-        try:
+    try:
+        with open(mcmeta_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-            pack_format = data.get("pack", {}).get("pack_format")
-            for version, fmt in PACK_FORMATS.items():
-                if fmt == pack_format:
-                    return version
-        except Exception:
-            return None
+        pack_format = data.get("pack", {}).get("pack_format")
+        for version, fmt in PACK_FORMATS.items():
+            if fmt == pack_format:
+                return version
+    except Exception:
+        return None
     return None
 
 def auto_target_for_downconvert(base_version):
@@ -173,23 +160,19 @@ def update_json_for_1211(path, report):
                 report.append(f"Updated JSON refs in {full}")
 
 # =========================
-# CONVERSION FUNCTIONS
+# PACK CONVERSION
 # =========================
 def convert_pack(src_path, base_version, target_version, original_filename=None):
     tmp = tempfile.mkdtemp()
     report = []
-
     if zipfile.is_zipfile(src_path):
         with zipfile.ZipFile(src_path, "r") as z:
             z.extractall(tmp)
     else:
         shutil.copytree(src_path, tmp, dirs_exist_ok=True)
-
     root_path = detect_nested_root(tmp)
-
     if not base_version:
         base_version = detect_pack_version(root_path) or "1.8"
-
     if normalize_version(base_version) < "1.13" <= normalize_version(target_version):
         apply_flattening(root_path, report)
     ensure_item_folder(root_path, report, target_version)
@@ -211,20 +194,20 @@ def convert_pack(src_path, base_version, target_version, original_filename=None)
     shutil.rmtree(tmp)
     return out_path, output_filename, report
 
+# =========================
+# FABRIC MOD CONVERSION
+# =========================
 def convert_fabric_mod(jar_path, target_version, original_filename=None):
     tmp = tempfile.mkdtemp()
     report = []
-
     with zipfile.ZipFile(jar_path, "r") as z:
         z.extractall(tmp)
-
     root_path = detect_nested_root(tmp)
     fabric_json_path = os.path.join(root_path, "fabric.mod.json")
     if not os.path.exists(fabric_json_path):
         shutil.rmtree(tmp)
-        raise ValueError("Not a Fabric mod (fabric.mod.json not found).")
+        raise ValueError("Not a Fabric mod.")
 
-    # Update version
     with open(fabric_json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     old_version = data.get("depends", {}).get("minecraft", "unknown")
@@ -233,7 +216,6 @@ def convert_fabric_mod(jar_path, target_version, original_filename=None):
         json.dump(data, f, indent=4)
     report.append(f"Updated Fabric mod version: {old_version} → {target_version}")
 
-    # Apply folder renames
     apply_flattening(root_path, report)
     rename_textures(root_path, report)
     apply_folder_remap(root_path, report, target_version)
@@ -253,7 +235,7 @@ def convert_fabric_mod(jar_path, target_version, original_filename=None):
     return out_path, output_filename, report
 
 # =========================
-# DISCORD HELPERS
+# SEND FILE
 # =========================
 async def send_file(interaction, file_path, filename, report=None, base_version=None, target_version=None):
     message = f"✅ {interaction.user.mention}, conversion completed"
@@ -285,7 +267,7 @@ async def send_file(interaction, file_path, filename, report=None, base_version=
 # CONVERSION HANDLER
 # =========================
 async def handle_conversion(interaction, attachment, target_version=None, base_version=None, downconvert=False, modconvert=False):
-    await interaction.response.defer(thinking=True)
+    await interaction.response.defer()
     src = tempfile.NamedTemporaryFile(delete=False)
     await attachment.save(src.name)
     try:
@@ -310,17 +292,19 @@ async def handle_conversion(interaction, attachment, target_version=None, base_v
         os.unlink(src.name)
 
 # =========================
-# DISCORD EVENTS & COMMANDS
+# AUTOCOMPLETE
+# =========================
+async def version_autocomplete(interaction: discord.Interaction, current: str):
+    return [app_commands.Choice(name=v, value=v) for v in VALID_VERSIONS if current in v]
+
+# =========================
+# COMMANDS
 # =========================
 @bot.event
 async def on_ready():
     guild = discord.Object(id=GUILD_ID)
     await bot.tree.sync(guild=guild)
     print(f"Logged in as {bot.user}")
-
-# Autocomplete for version arguments
-async def version_autocomplete(interaction: discord.Interaction, current: str):
-    return [app_commands.Choice(name=v, value=v) for v in VALID_VERSIONS if current in v]
 
 @bot.tree.command(name="convert", description="Upgrade a texture pack")
 @app_commands.describe(pack="Upload pack", target_version="Target version", base_version="Original version (optional)")
@@ -353,6 +337,6 @@ async def ptoggle(interaction: discord.Interaction):
     await interaction.response.send_message("🔒 Private mode ON (ephemeral output)" if private_mode else "🔓 Private mode OFF", ephemeral=True)
 
 # =========================
-# START BOT
+# RUN BOT
 # =========================
 bot.run(TOKEN)
