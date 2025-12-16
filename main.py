@@ -12,10 +12,10 @@ import tempfile
 # =========================
 TOKEN = os.environ.get("TOKEN")
 if not TOKEN:
-    print("❌ TOKEN NOT FOUND (set it in Railway/Env as TOKEN)")
+    print("❌ TOKEN NOT FOUND (set it in Railway Secrets as TOKEN)")
     raise SystemExit
 
-GUILD_ID = 1138096902395662436  # <-- Change to your server ID
+GUILD_ID = 1138096902395662436  # <-- Change to your server
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -23,27 +23,16 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # =========================
 # GLOBAL TOGGLES
 # =========================
-send_in_dm = False      # /toggle
-private_mode = False    # /ptoggle
+send_in_dm = False
+private_mode = False
 
 # =========================
 # VERSION DATA
 # =========================
 PACK_FORMATS = {
-    "1.8": 1,
-    "1.9": 2,
-    "1.10": 2,
-    "1.11": 3,
-    "1.12": 3,
-    "1.13": 4,
-    "1.14": 4,
-    "1.15": 5,
-    "1.16": 6,
-    "1.17": 7,
-    "1.18": 8,
-    "1.19": 9,
-    "1.20": 15,
-    "1.21": 18,
+    "1.8": 1, "1.9": 2, "1.10": 2, "1.11": 3, "1.12": 3,
+    "1.13": 4, "1.14": 4, "1.15": 5, "1.16": 6, "1.17": 7,
+    "1.18": 8, "1.19": 9, "1.20": 15, "1.21": 18,
 }
 
 FLATTENING_REMAP = {
@@ -59,13 +48,16 @@ TEXTURE_RENAMES = {
 
 VERSION_FOLDER_REMAP = {
     "1.21": {
-        "assets/minecraft/models/armor": "assets/minecraft/misc/equipment/netherite",
+        "assets/minecraft/models/armor": "assets/minecraft/textures/entity/equipment/humanoid",
+        "assets/minecraft/textures/gui": "assets/minecraft/textures/gui/widgets",
+        "assets/minecraft/textures/icons": "assets/minecraft/textures/gui/sprites/hud"
     }
 }
 
 # =========================
 # UTILITIES
 # =========================
+
 def normalize_version(v: str) -> str:
     return ".".join(v.split(".")[:2])
 
@@ -122,11 +114,34 @@ def detect_optifine(path, report):
     if os.path.exists(os.path.join(path, "assets/minecraft/optifine")):
         report.append("⚠ OptiFine detected — manual fixes may be needed")
 
+def update_json_for_1211(path, report):
+    for root, _, files in os.walk(path):
+        for file in files:
+            if not file.endswith(".json"):
+                continue
+            full = os.path.join(root, file)
+            with open(full, "r", encoding="utf-8") as f:
+                try:
+                    data = json.load(f)
+                except Exception:
+                    continue
+
+            changed = False
+            if "textures" in data:
+                for k, v in data["textures"].items():
+                    new_val = v.replace("models/armor/", "entity/equipment/humanoid/").replace("gui/", "gui/widgets/")
+                    if new_val != v:
+                        data["textures"][k] = new_val
+                        changed = True
+            if changed:
+                with open(full, "w", encoding="utf-8") as out:
+                    json.dump(data, out, indent=4)
+                report.append(f"Updated JSON refs in {full}")
+
 def convert_pack(src_path, base_version, target_version, original_filename=None):
     tmp = tempfile.mkdtemp()
     report = []
 
-    # Accept ANY upload: zip or folder-like
     if zipfile.is_zipfile(src_path):
         with zipfile.ZipFile(src_path, "r") as z:
             z.extractall(tmp)
@@ -139,6 +154,8 @@ def convert_pack(src_path, base_version, target_version, original_filename=None)
     ensure_item_folder(tmp, report)
     rename_textures(tmp, report)
     apply_folder_remap(tmp, report, target_version)
+    if normalize_version(target_version) >= "1.21":
+        update_json_for_1211(tmp, report)
     detect_optifine(tmp, report)
     update_pack_mcmeta(tmp, target_version)
 
@@ -160,72 +177,82 @@ def convert_pack(src_path, base_version, target_version, original_filename=None)
                 z.write(full, os.path.relpath(full, tmp))
 
     shutil.rmtree(tmp)
-    return out_path, output_filename
+    return out_path, output_filename, report
 
 # =========================
 # DISCORD
 # =========================
+
 @bot.event
 async def on_ready():
     guild = discord.Object(id=GUILD_ID)
     await bot.tree.sync(guild=guild)
     print(f"Logged in as {bot.user}")
 
-async def send_file(interaction, file_path, filename, base_version=None, target_version=None):
+async def send_file(interaction, file_path, filename, report=None, base_version=None, target_version=None):
     message = None
     if base_version and target_version:
-        message = f"✅ {interaction.user.mention}, the pack has successfully been converted from {base_version} to {target_version}"
+        message = (
+            f"✅ {interaction.user.mention}, the pack has successfully been converted "
+            f"from {base_version} to {target_version}"
+        )
 
-    # PRIVATE MODE → DM + ephemeral message
+    # PRIVATE MODE → EPHEMERAL ONLY
     if private_mode:
-        try:
-            await interaction.user.send(content=message, file=discord.File(file_path, filename=filename))
-            await interaction.followup.send("✅ File sent to your DMs.", ephemeral=True)
-        except discord.Forbidden:
+        await interaction.followup.send(
+            content=message,
+            file=discord.File(file_path, filename=filename),
+            ephemeral=True,
+        )
+        if report:
             await interaction.followup.send(
-                content=f"⚠ {interaction.user.mention}, I couldn't DM you. Only you can see this message.",
+                content="📄 **Conversion Report:**\n" + "\n".join(report),
                 ephemeral=True
             )
         return
 
-    # DM mode
+    # DM MODE
     if send_in_dm:
         try:
             await interaction.user.send(content=message, file=discord.File(file_path, filename=filename))
             await interaction.followup.send("✅ File sent to your DMs.", ephemeral=True)
         except discord.Forbidden:
-            await interaction.followup.send(
-                content=f"⚠ {interaction.user.mention}, I couldn't DM you. Sending here instead.",
-                file=discord.File(file_path, filename=filename),
-            )
+            await interaction.followup.send(content=f"⚠ {interaction.user.mention}, DM failed. Sending here instead.", file=discord.File(file_path, filename=filename))
     else:
-        # Normal channel send
         await interaction.followup.send(content=message, file=discord.File(file_path, filename=filename))
 
+    # Always send the conversion report ephemerally to the command user
+    if report:
+        await interaction.followup.send(
+            content="📄 **Conversion Report:**\n" + "\n".join(report),
+            ephemeral=True
+        )
+
 # =========================
-# SLASH COMMANDS
+# COMMANDS
 # =========================
-@bot.tree.command(name="convert", description="Upgrade a texture pack to a newer Minecraft version")
+
+@bot.tree.command(name="convert", description="Upgrade a texture pack")
 @app_commands.describe(pack="Upload pack", base_version="Original version", target_version="Target version")
 async def convert(interaction: discord.Interaction, pack: discord.Attachment, base_version: str, target_version: str):
     await interaction.response.defer(thinking=True)
     src = tempfile.NamedTemporaryFile(delete=False)
     await pack.save(src.name)
     try:
-        result_path, output_filename = convert_pack(src.name, base_version, target_version, pack.filename)
-        await send_file(interaction, result_path, output_filename, base_version, target_version)
+        result_path, output_filename, report = convert_pack(src.name, base_version, target_version, pack.filename)
+        await send_file(interaction, result_path, output_filename, report, base_version, target_version)
     finally:
         os.unlink(src.name)
 
-@bot.tree.command(name="downconvert", description="Downgrade a texture pack to an older Minecraft version")
+@bot.tree.command(name="downconvert", description="Downgrade a texture pack")
 @app_commands.describe(pack="Upload pack", base_version="Current version", target_version="Target older version")
 async def downconvert(interaction: discord.Interaction, pack: discord.Attachment, base_version: str, target_version: str):
     await interaction.response.defer(thinking=True)
     src = tempfile.NamedTemporaryFile(delete=False)
     await pack.save(src.name)
     try:
-        result_path, output_filename = convert_pack(src.name, base_version, target_version, pack.filename)
-        await send_file(interaction, result_path, output_filename, base_version, target_version)
+        result_path, output_filename, report = convert_pack(src.name, base_version, target_version, pack.filename)
+        await send_file(interaction, result_path, output_filename, report, base_version, target_version)
     finally:
         os.unlink(src.name)
 
@@ -235,19 +262,19 @@ async def toggle(interaction: discord.Interaction):
     send_in_dm = not send_in_dm
     await interaction.response.send_message(
         "✅ Files will now be sent to your DMs" if send_in_dm else "✅ Files will now be sent in the channel",
-        ephemeral=True,
+        ephemeral=True
     )
 
-@bot.tree.command(name="ptoggle", description="Toggle private output (only you see the result)")
+@bot.tree.command(name="ptoggle", description="Toggle private output (ephemeral) only for you")
 async def ptoggle(interaction: discord.Interaction):
     global private_mode
     private_mode = not private_mode
     await interaction.response.send_message(
         "🔒 Private mode ON (ephemeral output)" if private_mode else "🔓 Private mode OFF",
-        ephemeral=True,
+        ephemeral=True
     )
 
 # =========================
-# START
+# START BOT
 # =========================
 bot.run(TOKEN)
