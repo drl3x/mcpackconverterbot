@@ -80,7 +80,7 @@ def auto_target_for_downconvert(base_version):
     try:
         idx = versions.index(normalize_version(base_version))
         if idx > 0:
-            return versions[idx - 1]  # previous version
+            return versions[idx - 1]
     except ValueError:
         pass
     return versions[0]
@@ -126,24 +126,26 @@ def apply_folder_remap(path, report, target_version):
                     shutil.move(old_path, new_path)
                     report.append(f"Remapped folder: {old} → {new}")
 
-def ensure_item_folder(path, report):
-    old_item_path = os.path.join(path, "assets/minecraft/textures/items")
-    new_item_path = os.path.join(path, "assets/minecraft/textures/item")
-    if os.path.exists(old_item_path):
-        os.makedirs(os.path.dirname(new_item_path), exist_ok=True)
-        for file in os.listdir(old_item_path):
-            src_file = os.path.join(old_item_path, file)
-            dst_file = os.path.join(new_item_path, file)
-            if os.path.exists(dst_file):
-                base, ext = os.path.splitext(file)
-                dst_file = os.path.join(new_item_path, f"{base}_converted{ext}")
-            shutil.move(src_file, dst_file)
-            report.append(f"Moved: {src_file} → {dst_file}")
-        try:
-            os.rmdir(old_item_path)
-        except OSError:
-            pass
-        report.append("Renamed folder: assets/minecraft/textures/items → assets/minecraft/textures/item")
+def ensure_item_folder(path, report, target_version):
+    v = normalize_version(target_version)
+    if v >= "1.19":
+        old_item_path = os.path.join(path, "assets/minecraft/textures/items")
+        new_item_path = os.path.join(path, "assets/minecraft/textures/item")
+        if os.path.exists(old_item_path):
+            os.makedirs(os.path.dirname(new_item_path), exist_ok=True)
+            for file in os.listdir(old_item_path):
+                src_file = os.path.join(old_item_path, file)
+                dst_file = os.path.join(new_item_path, file)
+                if os.path.exists(dst_file):
+                    base, ext = os.path.splitext(file)
+                    dst_file = os.path.join(new_item_path, f"{base}_converted{ext}")
+                shutil.move(src_file, dst_file)
+                report.append(f"Moved: {src_file} → {dst_file}")
+            try:
+                os.rmdir(old_item_path)
+            except OSError:
+                pass
+            report.append("Renamed folder: assets/minecraft/textures/items → assets/minecraft/textures/item")
 
 def detect_optifine(path, report):
     if os.path.exists(os.path.join(path, "assets/minecraft/optifine")):
@@ -188,7 +190,7 @@ def convert_pack(src_path, base_version, target_version, original_filename=None)
     if normalize_version(base_version) < "1.13" <= normalize_version(target_version):
         apply_flattening(tmp, report)
 
-    ensure_item_folder(tmp, report)
+    ensure_item_folder(tmp, report, target_version)
     rename_textures(tmp, report)
     apply_folder_remap(tmp, report, target_version)
     if normalize_version(target_version) >= "1.21":
@@ -228,7 +230,7 @@ async def on_ready():
 async def send_file(interaction, file_path, filename, report=None, base_version=None, target_version=None):
     message = None
     if base_version and target_version:
-        message = f"✅ {interaction.user.mention}, the pack has successfully been converted from {base_version} to {target_version}"
+        message = f"✅ {interaction.user.mention}, the pack has been converted from {base_version} to {target_version}"
 
     if private_mode:
         await interaction.followup.send(content=message, file=discord.File(file_path, filename=filename), ephemeral=True)
@@ -240,8 +242,12 @@ async def send_file(interaction, file_path, filename, report=None, base_version=
         try:
             await interaction.user.send(content=message, file=discord.File(file_path, filename=filename))
             await interaction.followup.send("✅ File sent to your DMs.", ephemeral=True)
+            if report:
+                await interaction.user.send(content="📄 **Conversion Report:**\n" + "\n".join(report))
         except discord.Forbidden:
             await interaction.followup.send(content=f"⚠ {interaction.user.mention}, DM failed. Sending here instead.", file=discord.File(file_path, filename=filename))
+            if report:
+                await interaction.followup.send(content="📄 **Conversion Report:**\n" + "\n".join(report), ephemeral=True)
     else:
         await interaction.followup.send(content=message, file=discord.File(file_path, filename=filename))
         if report:
@@ -278,7 +284,6 @@ async def downconvert(interaction: discord.Interaction, pack: discord.Attachment
 
         if not base_version:
             base_version = detect_pack_version(tmp_dir) or "1.8"
-
         if not target_version:
             target_version = auto_target_for_downconvert(base_version)
 
