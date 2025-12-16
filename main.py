@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import tempfile
+import asyncio
 
 # =========================
 # KEEP-ALIVE (REPLIT)
@@ -196,29 +197,29 @@ async def send_file(interaction, file_path, filename, base_version=None, target_
     else:
         await interaction.followup.send(content=message, file=discord.File(file_path, filename=filename))
 
-@bot.tree.command(name="convert", description="Upgrade a texture pack")
-@app_commands.describe(pack="Upload pack", base_version="Original version", target_version="Target version")
-async def convert(interaction: discord.Interaction, pack: discord.Attachment, base_version: str, target_version: str):
+# =========================
+# SLASH COMMANDS
+# =========================
+async def handle_convert(interaction: discord.Interaction, pack: discord.Attachment, base_version: str, target_version: str):
     await interaction.response.defer(thinking=True)
     src = tempfile.NamedTemporaryFile(delete=False)
     await pack.save(src.name)
     try:
-        result_path, output_filename = convert_pack(src.name, base_version, target_version, pack.filename)
+        # Run the conversion in a separate thread to avoid blocking
+        result_path, output_filename = await asyncio.to_thread(convert_pack, src.name, base_version, target_version, pack.filename)
         await send_file(interaction, result_path, output_filename, base_version, target_version)
     finally:
         os.unlink(src.name)
 
+@bot.tree.command(name="convert", description="Upgrade a texture pack")
+@app_commands.describe(pack="Upload pack", base_version="Original version", target_version="Target version")
+async def convert(interaction: discord.Interaction, pack: discord.Attachment, base_version: str, target_version: str):
+    await handle_convert(interaction, pack, base_version, target_version)
+
 @bot.tree.command(name="downconvert", description="Downgrade a texture pack")
 @app_commands.describe(pack="Upload pack", base_version="Current version", target_version="Target older version")
 async def downconvert(interaction: discord.Interaction, pack: discord.Attachment, base_version: str, target_version: str):
-    await interaction.response.defer(thinking=True)
-    src = tempfile.NamedTemporaryFile(delete=False)
-    await pack.save(src.name)
-    try:
-        result_path, output_filename = convert_pack(src.name, base_version, target_version, pack.filename)
-        await send_file(interaction, result_path, output_filename, base_version, target_version)
-    finally:
-        os.unlink(src.name)
+    await handle_convert(interaction, pack, base_version, target_version)
 
 @bot.tree.command(name="toggle", description="Toggle sending files via DMs or channel")
 async def toggle(interaction: discord.Interaction):
