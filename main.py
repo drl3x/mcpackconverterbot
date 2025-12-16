@@ -9,25 +9,6 @@ import tempfile
 import asyncio
 
 # =========================
-# KEEP-ALIVE (REPLIT)
-# =========================
-from flask import Flask
-from threading import Thread
-
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "Bot is alive!"
-
-def run_web():
-    print("🌐 Web server starting on port 8080")
-    app.run(host="0.0.0.0", port=8080)
-
-def keep_alive():
-    Thread(target=run_web).start()
-
-# =========================
 # CONFIG
 # =========================
 TOKEN = os.environ.get("TOKEN")
@@ -205,7 +186,6 @@ async def handle_convert(interaction: discord.Interaction, pack: discord.Attachm
     src = tempfile.NamedTemporaryFile(delete=False)
     await pack.save(src.name)
     try:
-        # Run the conversion in a separate thread to avoid blocking
         result_path, output_filename = await asyncio.to_thread(convert_pack, src.name, base_version, target_version, pack.filename)
         await send_file(interaction, result_path, output_filename, base_version, target_version)
     finally:
@@ -236,5 +216,4 @@ async def ptoggle(interaction: discord.Interaction):
 # =========================
 # START
 # =========================
-keep_alive()
 bot.run(TOKEN)
