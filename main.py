@@ -13,8 +13,8 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN environment variable not set")
 
-GUILD_ID = YOUR_GUILD_ID_HERE  # <-- CHANGE THIS
-OWNER_ID = 899640436300324874
+GUILD_ID = 1138096902395662436 # Pack Hub Guild ID
+OWNER_ID = 899640436300324874 # @drl3x2015 User ID
 
 # =========================
 # BOT SETUP
