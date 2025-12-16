@@ -6,208 +6,115 @@ import json
 import os
 import shutil
 import tempfile
+import re
 
 # =========================
 # CONFIG
 # =========================
+
 TOKEN = os.environ.get("TOKEN")
 if not TOKEN:
-    print("❌ TOKEN NOT FOUND (set it in Railway Secrets as TOKEN)")
-    raise SystemExit
+    raise RuntimeError("TOKEN env var not set")
 
-GUILD_ID = 1138096902395662436  # <-- Change to your server
+GUILD_ID = 1138096902395662436
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # =========================
-# GLOBAL TOGGLES
+# PER-USER SETTINGS
 # =========================
-send_in_dm = False
-private_mode = False
+
+user_settings = {}  # user_id -> {"dm": bool, "private": bool}
+
+def get_settings(user_id: int):
+    if user_id not in user_settings:
+        user_settings[user_id] = {"dm": False, "private": False}
+    return user_settings[user_id]
 
 # =========================
 # VERSION DATA
 # =========================
+
 PACK_FORMATS = {
     "1.8": 1, "1.9": 2, "1.10": 2, "1.11": 3, "1.12": 3,
-    "1.13": 4, "1.14": 4, "1.15": 5, "1.16": 6, "1.17": 7,
-    "1.18": 8, "1.19": 9, "1.20": 15, "1.21": 18,
+    "1.13": 4, "1.14": 4, "1.15": 5, "1.16": 6,
+    "1.17": 7, "1.18": 8, "1.19": 9, "1.20": 15, "1.21": 18
 }
 
-FLATTENING_REMAP = {
-    "assets/minecraft/textures/blocks": "assets/minecraft/textures/block",
-    "assets/minecraft/textures/items": "assets/minecraft/textures/item",
-}
-
-TEXTURE_RENAMES = {
-    "grass_side.png": "grass_block_side.png",
-    "grass_top.png": "grass_block_top.png",
-    "stonebrick.png": "stone_bricks.png",
-}
-
-VERSION_FOLDER_REMAP = {
-    "1.21": {
-        "assets/minecraft/models/armor": "assets/minecraft/textures/entity/equipment/humanoid",
-        "assets/minecraft/textures/gui": "assets/minecraft/textures/gui/widgets",
-        "assets/minecraft/textures/icons": "assets/minecraft/textures/gui/sprites/hud"
-    }
-}
-
-# =========================
-# UTILITIES
-# =========================
-def normalize_version(v: str) -> str:
+def norm(v: str) -> str:
     return ".".join(v.split(".")[:2])
 
-def detect_pack_version(path):
-    mcmeta_path = os.path.join(path, "pack.mcmeta")
-    if not os.path.exists(mcmeta_path):
-        return None
-    with open(mcmeta_path, "r", encoding="utf-8") as f:
-        try:
-            data = json.load(f)
-            pack_format = data.get("pack", {}).get("pack_format")
-            for version, fmt in PACK_FORMATS.items():
-                if fmt == pack_format:
-                    return version
-        except Exception:
-            return None
-    return None
+# =========================
+# RESOURCE PACK FIXES
+# =========================
 
-def auto_target_for_downconvert(base_version):
-    versions = sorted(PACK_FORMATS.keys(), key=lambda v: PACK_FORMATS[v])
-    try:
-        idx = versions.index(normalize_version(base_version))
-        if idx > 0:
-            return versions[idx - 1]
-    except ValueError:
-        pass
-    return versions[0]
-
-def update_pack_mcmeta(path, target_version):
+def update_mcmeta(path, target):
     mcmeta = os.path.join(path, "pack.mcmeta")
     if not os.path.exists(mcmeta):
         return
     with open(mcmeta, "r", encoding="utf-8") as f:
         data = json.load(f)
     data.setdefault("pack", {})
-    data["pack"]["pack_format"] = PACK_FORMATS.get(normalize_version(target_version), max(PACK_FORMATS.values()))
+    data["pack"]["pack_format"] = PACK_FORMATS.get(norm(target), max(PACK_FORMATS.values()))
     with open(mcmeta, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
 
-def apply_flattening(path, report):
-    for old, new in FLATTENING_REMAP.items():
-        old_path = os.path.join(path, old)
-        new_path = os.path.join(path, new)
-        if os.path.exists(old_path):
-            os.makedirs(os.path.dirname(new_path), exist_ok=True)
-            shutil.move(old_path, new_path)
-            report.append(f"Flattened: {old} → {new}")
+def items_to_item(path, target, report):
+    if norm(target) >= "1.19":
+        old = os.path.join(path, "assets/minecraft/textures/items")
+        new = os.path.join(path, "assets/minecraft/textures/item")
+        if os.path.exists(old):
+            os.makedirs(new, exist_ok=True)
+            for f in os.listdir(old):
+                shutil.move(os.path.join(old, f), new)
+            shutil.rmtree(old)
+            report.append("Converted textures/items → textures/item")
 
-def rename_textures(path, report):
-    for root, _, files in os.walk(path):
-        for file in files:
-            if file in TEXTURE_RENAMES:
-                old = os.path.join(root, file)
-                new = os.path.join(root, TEXTURE_RENAMES[file])
-                os.rename(old, new)
-                report.append(f"Renamed: {file} → {TEXTURE_RENAMES[file]}")
-
-def apply_folder_remap(path, report, target_version):
-    v = normalize_version(target_version)
-    for version_key, mappings in VERSION_FOLDER_REMAP.items():
-        if v >= version_key:
-            for old, new in mappings.items():
-                old_path = os.path.join(path, old)
-                new_path = os.path.join(path, new)
-                if os.path.exists(old_path):
-                    os.makedirs(os.path.dirname(new_path), exist_ok=True)
-                    shutil.move(old_path, new_path)
-                    report.append(f"Remapped folder: {old} → {new}")
-
-def ensure_item_folder(path, report, target_version):
-    v = normalize_version(target_version)
-    if v >= "1.19":
-        old_item_path = os.path.join(path, "assets/minecraft/textures/items")
-        new_item_path = os.path.join(path, "assets/minecraft/textures/item")
-        if os.path.exists(old_item_path):
-            os.makedirs(os.path.dirname(new_item_path), exist_ok=True)
-            for file in os.listdir(old_item_path):
-                src_file = os.path.join(old_item_path, file)
-                dst_file = os.path.join(new_item_path, file)
-                if os.path.exists(dst_file):
-                    base, ext = os.path.splitext(file)
-                    dst_file = os.path.join(new_item_path, f"{base}_converted{ext}")
-                shutil.move(src_file, dst_file)
-                report.append(f"Moved: {src_file} → {dst_file}")
-            try:
-                os.rmdir(old_item_path)
-            except OSError:
-                pass
-            report.append("Renamed folder: assets/minecraft/textures/items → assets/minecraft/textures/item")
-
-def detect_optifine(path, report):
-    if os.path.exists(os.path.join(path, "assets/minecraft/optifine")):
-        report.append("⚠ OptiFine detected — manual fixes may be needed")
-
-def update_json_for_1211(path, report):
+def rewrite_json_paths(path, report):
     for root, _, files in os.walk(path):
         for file in files:
             if not file.endswith(".json"):
                 continue
-            full = os.path.join(root, file)
-            with open(full, "r", encoding="utf-8") as f:
-                try:
-                    data = json.load(f)
-                except Exception:
-                    continue
-            changed = False
-            if "textures" in data:
-                for k, v in data["textures"].items():
-                    new_val = v.replace("models/armor/", "entity/equipment/humanoid/").replace("gui/", "gui/widgets/").replace("icons/", "gui/sprites/hud/")
-                    if new_val != v:
-                        data["textures"][k] = new_val
-                        changed = True
-            if changed:
-                with open(full, "w", encoding="utf-8") as out:
-                    json.dump(data, out, indent=4)
-                report.append(f"Updated JSON refs in {full}")
+            p = os.path.join(root, file)
+            with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                txt = f.read()
 
-def convert_pack(src_path, base_version, target_version, original_filename=None):
+            new_txt = txt
+            new_txt = re.sub(
+                r"textures/models/armor/",
+                "textures/entity/equipment/humanoid/",
+                new_txt
+            )
+            new_txt = re.sub(
+                r"textures/gui/",
+                "textures/gui/widgets/",
+                new_txt
+            )
+
+            if new_txt != txt:
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(new_txt)
+                report.append(f"Rewrote JSON paths: {file}")
+
+def convert_pack(src, base, target, filename):
     tmp = tempfile.mkdtemp()
     report = []
 
-    if zipfile.is_zipfile(src_path):
-        with zipfile.ZipFile(src_path, "r") as z:
-            z.extractall(tmp)
-    else:
-        shutil.copytree(src_path, tmp, dirs_exist_ok=True)
+    with zipfile.ZipFile(src) as z:
+        z.extractall(tmp)
 
-    if not base_version:
-        base_version = detect_pack_version(tmp) or "1.8"
+    items_to_item(tmp, target, report)
+    rewrite_json_paths(tmp, report)
+    update_mcmeta(tmp, target)
 
-    if normalize_version(base_version) < "1.13" <= normalize_version(target_version):
-        apply_flattening(tmp, report)
-
-    ensure_item_folder(tmp, report, target_version)
-    rename_textures(tmp, report)
-    apply_folder_remap(tmp, report, target_version)
-    if normalize_version(target_version) >= "1.21":
-        update_json_for_1211(tmp, report)
-    detect_optifine(tmp, report)
-    update_pack_mcmeta(tmp, target_version)
-
-    with open(os.path.join(tmp, "conversion_report.txt"), "w") as f:
+    report_path = os.path.join(tmp, "conversion_report.txt")
+    with open(report_path, "w") as f:
         f.write("\n".join(report))
 
-    if original_filename:
-        name, _ = os.path.splitext(original_filename)
-    else:
-        name = os.path.splitext(os.path.basename(src_path))[0]
-
-    output_filename = f"{name}_converted.zip"
-    out_path = os.path.join(tempfile.gettempdir(), output_filename)
+    name, _ = os.path.splitext(filename)
+    out_name = f"{name}_converted.zip"
+    out_path = os.path.join(tempfile.gettempdir(), out_name)
 
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
         for root, _, files in os.walk(tmp):
@@ -216,111 +123,124 @@ def convert_pack(src_path, base_version, target_version, original_filename=None)
                 z.write(full, os.path.relpath(full, tmp))
 
     shutil.rmtree(tmp)
-    return out_path, output_filename, report
+    return out_path, out_name, report
 
 # =========================
-# DISCORD HELPERS
+# MOD LOADER DETECTION
 # =========================
-@bot.event
-async def on_ready():
-    guild = discord.Object(id=GUILD_ID)
-    await bot.tree.sync(guild=guild)
-    print(f"Logged in as {bot.user}")
 
-async def send_file(interaction, file_path, filename, report=None, base_version=None, target_version=None):
-    message = None
-    if base_version and target_version:
-        message = f"✅ {interaction.user.mention}, the pack/mod has been converted from {base_version} to {target_version}"
+def detect_mod_loader(jar_path):
+    with zipfile.ZipFile(jar_path) as z:
+        names = z.namelist()
+        if "fabric.mod.json" in names:
+            return "Fabric"
+        if "META-INF/mods.toml" in names:
+            return "Forge"
+        if "META-INF/neoforge.mods.toml" in names:
+            return "NeoForge"
+    return "Unknown"
 
-    if private_mode:
-        await interaction.followup.send(content=message, file=discord.File(file_path, filename=filename), ephemeral=True)
-        if report:
-            await interaction.followup.send(content="📄 **Conversion Report:**\n" + "\n".join(report), ephemeral=True)
+# =========================
+# FILE DELIVERY
+# =========================
+
+async def deliver(interaction, path, name, message):
+    settings = get_settings(interaction.user.id)
+
+    if settings["private"]:
+        await interaction.followup.send(
+            content=message,
+            file=discord.File(path, name),
+            ephemeral=True
+        )
         return
 
-    if send_in_dm:
+    if settings["dm"]:
         try:
-            await interaction.user.send(content=message, file=discord.File(file_path, filename=filename))
-            await interaction.followup.send("✅ File sent to your DMs.", ephemeral=True)
-            if report:
-                await interaction.user.send(content="📄 **Conversion Report:**\n" + "\n".join(report))
+            await interaction.user.send(
+                content=message,
+                file=discord.File(path, name)
+            )
+            await interaction.followup.send("✅ Sent to DMs", ephemeral=True)
+            return
         except discord.Forbidden:
-            await interaction.followup.send(content=f"⚠ {interaction.user.mention}, DM failed. Sending here instead.", file=discord.File(file_path, filename=filename))
-            if report:
-                await interaction.followup.send(content="📄 **Conversion Report:**\n" + "\n".join(report), ephemeral=True)
-    else:
-        await interaction.followup.send(content=message, file=discord.File(file_path, filename=filename))
-        if report:
-            await interaction.followup.send(content="📄 **Conversion Report:**\n" + "\n".join(report), ephemeral=True)
+            pass
+
+    await interaction.followup.send(
+        content=message,
+        file=discord.File(path, name)
+    )
 
 # =========================
 # COMMANDS
 # =========================
-@bot.tree.command(name="convert", description="Upgrade a texture pack")
-@app_commands.describe(pack="Upload pack", target_version="Target version", base_version="Original version (optional)")
-async def convert(interaction: discord.Interaction, pack: discord.Attachment, target_version: str, base_version: str = None):
+
+@bot.tree.command(name="convert")
+async def convert(interaction, pack: discord.Attachment, base_version: str, target_version: str):
     await interaction.response.defer(thinking=True)
-    src = tempfile.NamedTemporaryFile(delete=False)
-    await pack.save(src.name)
-    try:
-        result_path, output_filename, report = convert_pack(src.name, base_version, target_version, pack.filename)
-        await send_file(interaction, result_path, output_filename, report, base_version or "auto-detected", target_version)
-    finally:
-        os.unlink(src.name)
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    await pack.save(tmp.name)
 
-@bot.tree.command(name="downconvert", description="Downgrade a texture pack")
-@app_commands.describe(pack="Upload pack", target_version="Target older version (optional)", base_version="Current version (optional)")
-async def downconvert(interaction: discord.Interaction, pack: discord.Attachment, target_version: str = None, base_version: str = None):
+    out, name, _ = convert_pack(tmp.name, base_version, target_version, pack.filename)
+    msg = f"✅ {interaction.user.mention} converted {base_version} → {target_version}"
+    await deliver(interaction, out, name, msg)
+    os.unlink(tmp.name)
+
+@bot.tree.command(name="downconvert")
+async def downconvert(interaction, pack: discord.Attachment, base_version: str, target_version: str):
     await interaction.response.defer(thinking=True)
-    src = tempfile.NamedTemporaryFile(delete=False)
-    await pack.save(src.name)
-    try:
-        tmp_dir = tempfile.mkdtemp()
-        if zipfile.is_zipfile(src.name):
-            with zipfile.ZipFile(src.name, "r") as z:
-                z.extractall(tmp_dir)
-        else:
-            shutil.copytree(src.name, tmp_dir, dirs_exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    await pack.save(tmp.name)
 
-        if not base_version:
-            base_version = detect_pack_version(tmp_dir) or "1.8"
-        if not target_version:
-            target_version = auto_target_for_downconvert(base_version)
+    out, name, _ = convert_pack(tmp.name, base_version, target_version, pack.filename)
+    msg = f"✅ {interaction.user.mention} downgraded {base_version} → {target_version}"
+    await deliver(interaction, out, name, msg)
+    os.unlink(tmp.name)
 
-        result_path, output_filename, report = convert_pack(src.name, base_version, target_version, pack.filename)
-        await send_file(interaction, result_path, output_filename, report, base_version, target_version)
-    finally:
-        os.unlink(src.name)
-
-@bot.tree.command(name="modconvert", description="Convert a mod .jar from base to target version")
-@app_commands.describe(mod="Upload mod (.jar)", base_version="Original version", target_version="Target version")
-async def modconvert(interaction: discord.Interaction, mod: discord.Attachment, base_version: str, target_version: str):
+@bot.tree.command(name="modconvert")
+async def modconvert(interaction, mod: discord.Attachment, base_version: str, target_version: str):
     await interaction.response.defer(thinking=True)
-    src = tempfile.NamedTemporaryFile(delete=False)
-    await mod.save(src.name)
-    try:
-        name, ext = os.path.splitext(mod.filename)
-        output_filename = f"{name}_converted{ext}"
-        out_path = os.path.join(tempfile.gettempdir(), output_filename)
-        shutil.copy(src.name, out_path)
-        report = [f"Mod {mod.filename} prepared for conversion from {base_version} to {target_version}."]
-        await send_file(interaction, out_path, output_filename, report, base_version, target_version)
-    finally:
-        os.unlink(src.name)
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    await mod.save(tmp.name)
 
-@bot.tree.command(name="toggle", description="Toggle sending files via DMs or channel")
-async def toggle(interaction: discord.Interaction):
-    global send_in_dm
-    send_in_dm = not send_in_dm
-    await interaction.response.send_message("✅ Files will now be sent to your DMs" if send_in_dm else "✅ Files will now be sent in the channel", ephemeral=True)
+    loader = detect_mod_loader(tmp.name)
+    name, ext = os.path.splitext(mod.filename)
+    out_name = f"{name}_converted{ext}"
+    out_path = os.path.join(tempfile.gettempdir(), out_name)
+    shutil.copy(tmp.name, out_path)
 
-@bot.tree.command(name="ptoggle", description="Toggle private output (ephemeral) only for you")
-async def ptoggle(interaction: discord.Interaction):
-    global private_mode
-    private_mode = not private_mode
-    await interaction.response.send_message("🔒 Private mode ON (ephemeral output)" if private_mode else "🔓 Private mode OFF", ephemeral=True)
+    msg = f"✅ {interaction.user.mention} | {loader} mod prepared {base_version} → {target_version}"
+    await deliver(interaction, out_path, out_name, msg)
+    os.unlink(tmp.name)
+
+@bot.tree.command(name="toggle")
+async def toggle(interaction):
+    s = get_settings(interaction.user.id)
+    s["dm"] = not s["dm"]
+    await interaction.response.send_message(
+        "📩 DM delivery ON" if s["dm"] else "📢 Channel delivery ON",
+        ephemeral=True
+    )
+
+@bot.tree.command(name="ptoggle")
+async def ptoggle(interaction):
+    s = get_settings(interaction.user.id)
+    s["private"] = not s["private"]
+    await interaction.response.send_message(
+        "🔒 Private output ON" if s["private"] else "🔓 Private output OFF",
+        ephemeral=True
+    )
 
 # =========================
-# START BOT
+# READY
 # =========================
+
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user}")
+    guild = discord.Object(id=GUILD_ID)
+    bot.tree.clear_commands(guild=guild)
+    await bot.tree.sync(guild=guild)
+    print("✅ Commands synced")
+
 bot.run(TOKEN)
