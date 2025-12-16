@@ -7,7 +7,6 @@ import os
 import shutil
 import tempfile
 import asyncio
-import re
 
 # =========================
 # CONFIG
@@ -17,7 +16,7 @@ if not TOKEN:
     print("❌ TOKEN NOT FOUND (set it in Railway Secrets as TOKEN)")
     raise SystemExit
 
-GUILD_ID = 1138096902395662436  # <-- Change to your server
+GUILD_ID = 1138096902395662436  # Your server ID
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -36,6 +35,8 @@ PACK_FORMATS = {
     "1.13": 4, "1.14": 4, "1.15": 5, "1.16": 6, "1.17": 7,
     "1.18": 8, "1.19": 9, "1.20": 15, "1.21": 18,
 }
+
+VALID_VERSIONS = list(PACK_FORMATS.keys())
 
 FLATTENING_REMAP = {
     "assets/minecraft/textures/blocks": "assets/minecraft/textures/block",
@@ -87,19 +88,7 @@ def auto_target_for_downconvert(base_version):
         pass
     return versions[0]
 
-def update_pack_mcmeta(path, target_version):
-    mcmeta = os.path.join(path, "pack.mcmeta")
-    if not os.path.exists(mcmeta):
-        return
-    with open(mcmeta, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    data.setdefault("pack", {})
-    data["pack"]["pack_format"] = PACK_FORMATS.get(normalize_version(target_version), max(PACK_FORMATS.values()))
-    with open(mcmeta, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4)
-
 def detect_nested_root(path):
-    """Handle zip/jar with a single folder containing assets"""
     items = os.listdir(path)
     if len(items) == 1:
         candidate = os.path.join(path, items[0])
@@ -138,7 +127,6 @@ def apply_folder_remap(path, report, target_version):
                     report.append(f"Remapped folder: {old} → {new}")
 
 def ensure_item_folder(path, report, target_version):
-    v = normalize_version(target_version)
     old_item_path = os.path.join(path, "assets/minecraft/textures/items")
     new_item_path = os.path.join(path, "assets/minecraft/textures/item")
     if os.path.exists(old_item_path):
@@ -185,7 +173,7 @@ def update_json_for_1211(path, report):
                 report.append(f"Updated JSON refs in {full}")
 
 # =========================
-# PACK CONVERSION
+# CONVERSION FUNCTIONS
 # =========================
 def convert_pack(src_path, base_version, target_version, original_filename=None):
     tmp = tempfile.mkdtemp()
@@ -210,17 +198,8 @@ def convert_pack(src_path, base_version, target_version, original_filename=None)
     if normalize_version(target_version) >= "1.21":
         update_json_for_1211(root_path, report)
     detect_optifine(root_path, report)
-    update_pack_mcmeta(root_path, target_version)
 
-    with open(os.path.join(root_path, "conversion_report.txt"), "w") as f:
-        f.write("\n".join(report))
-
-    if original_filename:
-        name, _ = os.path.splitext(original_filename)
-    else:
-        name = os.path.splitext(os.path.basename(src_path))[0]
-
-    output_filename = f"{name}_converted.zip"
+    output_filename = (os.path.splitext(original_filename)[0] + "_converted.zip") if original_filename else "converted_pack.zip"
     out_path = os.path.join(tempfile.gettempdir(), output_filename)
 
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
@@ -232,51 +211,36 @@ def convert_pack(src_path, base_version, target_version, original_filename=None)
     shutil.rmtree(tmp)
     return out_path, output_filename, report
 
-# =========================
-# MOD CONVERSION (Fabric only)
-# =========================
 def convert_fabric_mod(jar_path, target_version, original_filename=None):
     tmp = tempfile.mkdtemp()
     report = []
 
-    # Extract JAR
     with zipfile.ZipFile(jar_path, "r") as z:
         z.extractall(tmp)
 
     root_path = detect_nested_root(tmp)
-
-    # Detect Fabric mod
     fabric_json_path = os.path.join(root_path, "fabric.mod.json")
     if not os.path.exists(fabric_json_path):
         shutil.rmtree(tmp)
         raise ValueError("Not a Fabric mod (fabric.mod.json not found).")
 
-    # Update version in fabric.mod.json
+    # Update version
     with open(fabric_json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     old_version = data.get("depends", {}).get("minecraft", "unknown")
-    data["depends"]["minecraft"] = target_version
+    data.setdefault("depends", {})["minecraft"] = target_version
     with open(fabric_json_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
     report.append(f"Updated Fabric mod version: {old_version} → {target_version}")
 
-    # Apply folder renames similar to pack conversion
+    # Apply folder renames
     apply_flattening(root_path, report)
     rename_textures(root_path, report)
     apply_folder_remap(root_path, report, target_version)
     ensure_item_folder(root_path, report, target_version)
     detect_optifine(root_path, report)
 
-    # Save report inside mod
-    with open(os.path.join(root_path, "conversion_report.txt"), "w") as f:
-        f.write("\n".join(report))
-
-    # Repackage into JAR
-    if original_filename:
-        name, _ = os.path.splitext(original_filename)
-    else:
-        name = os.path.splitext(os.path.basename(jar_path))[0]
-    output_filename = f"{name}_converted.jar"
+    output_filename = (os.path.splitext(original_filename)[0] + "_converted.jar") if original_filename else "converted_mod.jar"
     out_path = os.path.join(tempfile.gettempdir(), output_filename)
 
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
@@ -292,9 +256,9 @@ def convert_fabric_mod(jar_path, target_version, original_filename=None):
 # DISCORD HELPERS
 # =========================
 async def send_file(interaction, file_path, filename, report=None, base_version=None, target_version=None):
-    message = None
+    message = f"✅ {interaction.user.mention}, conversion completed"
     if base_version and target_version:
-        message = f"✅ {interaction.user.mention}, conversion completed: {base_version} → {target_version}"
+        message += f": {base_version} → {target_version}"
 
     if private_mode:
         await interaction.followup.send(content=message, file=discord.File(file_path, filename=filename), ephemeral=True)
@@ -320,17 +284,15 @@ async def send_file(interaction, file_path, filename, report=None, base_version=
 # =========================
 # CONVERSION HANDLER
 # =========================
-async def handle_conversion(interaction, pack, target_version=None, base_version=None, downconvert=False, modconvert=False):
+async def handle_conversion(interaction, attachment, target_version=None, base_version=None, downconvert=False, modconvert=False):
     await interaction.response.defer(thinking=True)
     src = tempfile.NamedTemporaryFile(delete=False)
-    await pack.save(src.name)
+    await attachment.save(src.name)
     try:
         if modconvert:
-            # Fabric mod conversion
-            result_path, output_filename, report = await asyncio.to_thread(convert_fabric_mod, src.name, target_version, pack.filename)
+            result_path, output_filename, report = await asyncio.to_thread(convert_fabric_mod, src.name, target_version, attachment.filename)
             await send_file(interaction, result_path, output_filename, report, base_version="auto-detected", target_version=target_version)
         else:
-            # Pack conversion
             if downconvert:
                 tmp_dir = tempfile.mkdtemp()
                 if zipfile.is_zipfile(src.name):
@@ -342,7 +304,7 @@ async def handle_conversion(interaction, pack, target_version=None, base_version
                     base_version = detect_pack_version(tmp_dir) or "1.8"
                 if not target_version:
                     target_version = auto_target_for_downconvert(base_version)
-            result_path, output_filename, report = await asyncio.to_thread(convert_pack, src.name, base_version, target_version, pack.filename)
+            result_path, output_filename, report = await asyncio.to_thread(convert_pack, src.name, base_version, target_version, attachment.filename)
             await send_file(interaction, result_path, output_filename, report, base_version, target_version)
     finally:
         os.unlink(src.name)
@@ -356,18 +318,25 @@ async def on_ready():
     await bot.tree.sync(guild=guild)
     print(f"Logged in as {bot.user}")
 
+# Autocomplete for version arguments
+async def version_autocomplete(interaction: discord.Interaction, current: str):
+    return [app_commands.Choice(name=v, value=v) for v in VALID_VERSIONS if current in v]
+
 @bot.tree.command(name="convert", description="Upgrade a texture pack")
 @app_commands.describe(pack="Upload pack", target_version="Target version", base_version="Original version (optional)")
+@app_commands.autocomplete(target_version=version_autocomplete)
 async def convert(interaction: discord.Interaction, pack: discord.Attachment, target_version: str, base_version: str = None):
     await handle_conversion(interaction, pack, target_version, base_version, downconvert=False, modconvert=False)
 
 @bot.tree.command(name="downconvert", description="Downgrade a texture pack")
 @app_commands.describe(pack="Upload pack", target_version="Target older version (optional)", base_version="Current version (optional)")
+@app_commands.autocomplete(target_version=version_autocomplete)
 async def downconvert(interaction: discord.Interaction, pack: discord.Attachment, target_version: str = None, base_version: str = None):
     await handle_conversion(interaction, pack, target_version, base_version, downconvert=True, modconvert=False)
 
 @bot.tree.command(name="modconvert", description="Convert Fabric mods to target Minecraft version")
 @app_commands.describe(mod="Upload Fabric mod .jar", target_version="Target Minecraft version")
+@app_commands.autocomplete(target_version=version_autocomplete)
 async def modconvert(interaction: discord.Interaction, mod: discord.Attachment, target_version: str):
     await handle_conversion(interaction, mod, target_version=target_version, modconvert=True)
 
