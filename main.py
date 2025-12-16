@@ -45,11 +45,19 @@ def is_owner(interaction: discord.Interaction) -> bool:
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}")
     guild = discord.Object(id=GUILD_ID)
-    bot.tree.copy_global_to(guild=guild)
+
+    # REMOVE all global commands
+    bot.tree.clear_commands(guild=None)
+
+    # REMOVE guild commands
+    bot.tree.clear_commands(guild=guild)
+
+    # Re-sync ONLY guild commands
     await bot.tree.sync(guild=guild)
-    print("Slash commands synced")
+
+    print(f"✅ Logged in as {bot.user}")
+
 
 # =========================
 # OWNER COMMANDS
