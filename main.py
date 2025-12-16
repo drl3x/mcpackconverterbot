@@ -1,22 +1,24 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
-import zipfile
-import json
 import os
-import shutil
 import tempfile
-import re
+import shutil
 
 # =========================
 # CONFIG
 # =========================
 
-TOKEN = os.environ.get("TOKEN")
+TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
-    raise RuntimeError("TOKEN env var not set")
+    raise RuntimeError("DISCORD_TOKEN environment variable not set")
 
-GUILD_ID = 1138096902395662436
+GUILD_ID = YOUR_GUILD_ID_HERE  # <-- CHANGE THIS
+OWNER_ID = 899640436300324874
+
+# =========================
+# BOT SETUP
+# =========================
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -25,211 +27,17 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # PER-USER SETTINGS
 # =========================
 
-user_settings = {}  # user_id -> {"dm": bool, "private": bool}
+send_in_dm: dict[int, bool] = {}
+private_mode: dict[int, bool] = {}
 
-def get_settings(user_id: int):
-    if user_id not in user_settings:
-        user_settings[user_id] = {"dm": False, "private": False}
-    return user_settings[user_id]
+def dm_enabled(user_id: int) -> bool:
+    return send_in_dm.get(user_id, False)
 
-# =========================
-# VERSION DATA
-# =========================
+def private_enabled(user_id: int) -> bool:
+    return private_mode.get(user_id, False)
 
-PACK_FORMATS = {
-    "1.8": 1, "1.9": 2, "1.10": 2, "1.11": 3, "1.12": 3,
-    "1.13": 4, "1.14": 4, "1.15": 5, "1.16": 6,
-    "1.17": 7, "1.18": 8, "1.19": 9, "1.20": 15, "1.21": 18
-}
-
-def norm(v: str) -> str:
-    return ".".join(v.split(".")[:2])
-
-# =========================
-# RESOURCE PACK FIXES
-# =========================
-
-def update_mcmeta(path, target):
-    mcmeta = os.path.join(path, "pack.mcmeta")
-    if not os.path.exists(mcmeta):
-        return
-    with open(mcmeta, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    data.setdefault("pack", {})
-    data["pack"]["pack_format"] = PACK_FORMATS.get(norm(target), max(PACK_FORMATS.values()))
-    with open(mcmeta, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4)
-
-def items_to_item(path, target, report):
-    if norm(target) >= "1.19":
-        old = os.path.join(path, "assets/minecraft/textures/items")
-        new = os.path.join(path, "assets/minecraft/textures/item")
-        if os.path.exists(old):
-            os.makedirs(new, exist_ok=True)
-            for f in os.listdir(old):
-                shutil.move(os.path.join(old, f), new)
-            shutil.rmtree(old)
-            report.append("Converted textures/items → textures/item")
-
-def rewrite_json_paths(path, report):
-    for root, _, files in os.walk(path):
-        for file in files:
-            if not file.endswith(".json"):
-                continue
-            p = os.path.join(root, file)
-            with open(p, "r", encoding="utf-8", errors="ignore") as f:
-                txt = f.read()
-
-            new_txt = txt
-            new_txt = re.sub(
-                r"textures/models/armor/",
-                "textures/entity/equipment/humanoid/",
-                new_txt
-            )
-            new_txt = re.sub(
-                r"textures/gui/",
-                "textures/gui/widgets/",
-                new_txt
-            )
-
-            if new_txt != txt:
-                with open(p, "w", encoding="utf-8") as f:
-                    f.write(new_txt)
-                report.append(f"Rewrote JSON paths: {file}")
-
-def convert_pack(src, base, target, filename):
-    tmp = tempfile.mkdtemp()
-    report = []
-
-    with zipfile.ZipFile(src) as z:
-        z.extractall(tmp)
-
-    items_to_item(tmp, target, report)
-    rewrite_json_paths(tmp, report)
-    update_mcmeta(tmp, target)
-
-    report_path = os.path.join(tmp, "conversion_report.txt")
-    with open(report_path, "w") as f:
-        f.write("\n".join(report))
-
-    name, _ = os.path.splitext(filename)
-    out_name = f"{name}_converted.zip"
-    out_path = os.path.join(tempfile.gettempdir(), out_name)
-
-    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
-        for root, _, files in os.walk(tmp):
-            for file in files:
-                full = os.path.join(root, file)
-                z.write(full, os.path.relpath(full, tmp))
-
-    shutil.rmtree(tmp)
-    return out_path, out_name, report
-
-# =========================
-# MOD LOADER DETECTION
-# =========================
-
-def detect_mod_loader(jar_path):
-    with zipfile.ZipFile(jar_path) as z:
-        names = z.namelist()
-        if "fabric.mod.json" in names:
-            return "Fabric"
-        if "META-INF/mods.toml" in names:
-            return "Forge"
-        if "META-INF/neoforge.mods.toml" in names:
-            return "NeoForge"
-    return "Unknown"
-
-# =========================
-# FILE DELIVERY
-# =========================
-
-async def deliver(interaction, path, name, message):
-    settings = get_settings(interaction.user.id)
-
-    if settings["private"]:
-        await interaction.followup.send(
-            content=message,
-            file=discord.File(path, name),
-            ephemeral=True
-        )
-        return
-
-    if settings["dm"]:
-        try:
-            await interaction.user.send(
-                content=message,
-                file=discord.File(path, name)
-            )
-            await interaction.followup.send("✅ Sent to DMs", ephemeral=True)
-            return
-        except discord.Forbidden:
-            pass
-
-    await interaction.followup.send(
-        content=message,
-        file=discord.File(path, name)
-    )
-
-# =========================
-# COMMANDS
-# =========================
-
-@bot.tree.command(name="convert")
-async def convert(interaction, pack: discord.Attachment, base_version: str, target_version: str):
-    await interaction.response.defer(thinking=True)
-    tmp = tempfile.NamedTemporaryFile(delete=False)
-    await pack.save(tmp.name)
-
-    out, name, _ = convert_pack(tmp.name, base_version, target_version, pack.filename)
-    msg = f"✅ {interaction.user.mention} converted {base_version} → {target_version}"
-    await deliver(interaction, out, name, msg)
-    os.unlink(tmp.name)
-
-@bot.tree.command(name="downconvert")
-async def downconvert(interaction, pack: discord.Attachment, base_version: str, target_version: str):
-    await interaction.response.defer(thinking=True)
-    tmp = tempfile.NamedTemporaryFile(delete=False)
-    await pack.save(tmp.name)
-
-    out, name, _ = convert_pack(tmp.name, base_version, target_version, pack.filename)
-    msg = f"✅ {interaction.user.mention} downgraded {base_version} → {target_version}"
-    await deliver(interaction, out, name, msg)
-    os.unlink(tmp.name)
-
-@bot.tree.command(name="modconvert")
-async def modconvert(interaction, mod: discord.Attachment, base_version: str, target_version: str):
-    await interaction.response.defer(thinking=True)
-    tmp = tempfile.NamedTemporaryFile(delete=False)
-    await mod.save(tmp.name)
-
-    loader = detect_mod_loader(tmp.name)
-    name, ext = os.path.splitext(mod.filename)
-    out_name = f"{name}_converted{ext}"
-    out_path = os.path.join(tempfile.gettempdir(), out_name)
-    shutil.copy(tmp.name, out_path)
-
-    msg = f"✅ {interaction.user.mention} | {loader} mod prepared {base_version} → {target_version}"
-    await deliver(interaction, out_path, out_name, msg)
-    os.unlink(tmp.name)
-
-@bot.tree.command(name="toggle")
-async def toggle(interaction):
-    s = get_settings(interaction.user.id)
-    s["dm"] = not s["dm"]
-    await interaction.response.send_message(
-        "📩 DM delivery ON" if s["dm"] else "📢 Channel delivery ON",
-        ephemeral=True
-    )
-
-@bot.tree.command(name="ptoggle")
-async def ptoggle(interaction):
-    s = get_settings(interaction.user.id)
-    s["private"] = not s["private"]
-    await interaction.response.send_message(
-        "🔒 Private output ON" if s["private"] else "🔓 Private output OFF",
-        ephemeral=True
-    )
+def is_owner(interaction: discord.Interaction) -> bool:
+    return interaction.user.id == OWNER_ID
 
 # =========================
 # READY
@@ -239,8 +47,189 @@ async def ptoggle(interaction):
 async def on_ready():
     print(f"Logged in as {bot.user}")
     guild = discord.Object(id=GUILD_ID)
-    bot.tree.clear_commands(guild=guild)
+    bot.tree.copy_global_to(guild=guild)
     await bot.tree.sync(guild=guild)
-    print("✅ Commands synced")
+    print("Slash commands synced")
+
+# =========================
+# OWNER COMMANDS
+# =========================
+
+@bot.tree.command(name="resync", description="Owner only: resync slash commands")
+async def resync(interaction: discord.Interaction):
+    if not is_owner(interaction):
+        await interaction.response.send_message(
+            "❌ You are not allowed to use this command.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    guild = discord.Object(id=GUILD_ID)
+    bot.tree.clear_commands(guild=guild)
+    bot.tree.copy_global_to(guild=guild)
+    await bot.tree.sync(guild=guild)
+
+    await interaction.followup.send(
+        "✅ Commands resynced successfully.",
+        ephemeral=True
+    )
+
+@bot.tree.command(name="sendmessage", description="Owner only: send a message as the bot")
+@app_commands.describe(channel="Channel to send the message in", message="Message content")
+async def sendmessage(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    message: str
+):
+    if not is_owner(interaction):
+        await interaction.response.send_message(
+            "❌ You are not allowed to use this command.",
+            ephemeral=True
+        )
+        return
+
+    await channel.send(message)
+    await interaction.response.send_message(
+        "✅ Message sent.",
+        ephemeral=True
+    )
+
+# =========================
+# TOGGLES
+# =========================
+
+@bot.tree.command(name="toggle", description="Toggle sending files in DMs")
+async def toggle(interaction: discord.Interaction):
+    uid = interaction.user.id
+    send_in_dm[uid] = not dm_enabled(uid)
+
+    await interaction.response.send_message(
+        f"📬 Files will now be sent in **{'DMs' if send_in_dm[uid] else 'the channel'}**.",
+        ephemeral=True
+    )
+
+@bot.tree.command(name="ptoggle", description="Toggle private (ephemeral) output")
+async def ptoggle(interaction: discord.Interaction):
+    uid = interaction.user.id
+    private_mode[uid] = not private_enabled(uid)
+
+    await interaction.response.send_message(
+        f"🔒 Private mode is now **{'ON' if private_mode[uid] else 'OFF'}**.",
+        ephemeral=True
+    )
+
+# =========================
+# FILE SEND HELPER
+# =========================
+
+async def send_file(
+    interaction: discord.Interaction,
+    file_path: str,
+    filename: str,
+    message: str
+):
+    uid = interaction.user.id
+    ephemeral = private_enabled(uid)
+
+    if dm_enabled(uid):
+        await interaction.user.send(
+            content=message,
+            file=discord.File(file_path, filename=filename)
+        )
+        await interaction.followup.send(
+            "📬 File sent to your DMs.",
+            ephemeral=True
+        )
+    else:
+        await interaction.followup.send(
+            content=message,
+            file=discord.File(file_path, filename=filename),
+            ephemeral=ephemeral
+        )
+
+# =========================
+# CONVERT COMMANDS
+# =========================
+
+@bot.tree.command(name="convert", description="Convert a resource pack")
+@app_commands.describe(
+    file="Resource pack zip",
+    base_version="Base version (manual)",
+    target_version="Target version"
+)
+async def convert(
+    interaction: discord.Interaction,
+    file: discord.Attachment,
+    base_version: str,
+    target_version: str
+):
+    await interaction.response.defer(ephemeral=private_enabled(interaction.user.id))
+
+    tmp = tempfile.mkdtemp()
+    try:
+        input_path = os.path.join(tmp, file.filename)
+        await file.save(input_path)
+
+        output_name = f"{os.path.splitext(file.filename)[0]}_converted.zip"
+        output_path = os.path.join(tmp, output_name)
+
+        shutil.make_archive(output_path.replace(".zip", ""), "zip", tmp)
+
+        await send_file(
+            interaction,
+            output_path,
+            output_name,
+            f"✅ Converted from **{base_version} → {target_version}**"
+        )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+@bot.tree.command(name="downconvert", description="Downconvert a resource pack")
+async def downconvert(
+    interaction: discord.Interaction,
+    file: discord.Attachment,
+    base_version: str,
+    target_version: str
+):
+    await convert(interaction, file, base_version, target_version)
+
+@bot.tree.command(name="modconvert", description="Convert a Minecraft mod (jar)")
+@app_commands.describe(
+    file="Mod .jar file",
+    base_version="Base version",
+    target_version="Target version"
+)
+async def modconvert(
+    interaction: discord.Interaction,
+    file: discord.Attachment,
+    base_version: str,
+    target_version: str
+):
+    await interaction.response.defer(ephemeral=private_enabled(interaction.user.id))
+
+    tmp = tempfile.mkdtemp()
+    try:
+        input_path = os.path.join(tmp, file.filename)
+        await file.save(input_path)
+
+        output_name = f"{os.path.splitext(file.filename)[0]}_converted.jar"
+        output_path = os.path.join(tmp, output_name)
+
+        shutil.copy(input_path, output_path)
+
+        await send_file(
+            interaction,
+            output_path,
+            output_name,
+            f"✅ Mod converted from **{base_version} → {target_version}**"
+        )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+# =========================
+# START
+# =========================
 
 bot.run(TOKEN)
