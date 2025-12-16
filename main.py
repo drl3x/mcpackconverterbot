@@ -6,14 +6,13 @@ import json
 import os
 import shutil
 import tempfile
-import asyncio
 
 # =========================
 # CONFIG
 # =========================
 TOKEN = os.environ.get("TOKEN")
 if not TOKEN:
-    print("❌ TOKEN NOT FOUND (set it in Railway Environment Variables as TOKEN)")
+    print("❌ TOKEN NOT FOUND (set it in Railway/Env as TOKEN)")
     raise SystemExit
 
 GUILD_ID = 1138096902395662436  # <-- Change to your server ID
@@ -31,9 +30,20 @@ private_mode = False    # /ptoggle
 # VERSION DATA
 # =========================
 PACK_FORMATS = {
-    "1.8": 1, "1.9": 2, "1.10": 2, "1.11": 3, "1.12": 3,
-    "1.13": 4, "1.14": 4, "1.15": 5, "1.16": 6, "1.17": 7,
-    "1.18": 8, "1.19": 9, "1.20": 15, "1.21": 18,
+    "1.8": 1,
+    "1.9": 2,
+    "1.10": 2,
+    "1.11": 3,
+    "1.12": 3,
+    "1.13": 4,
+    "1.14": 4,
+    "1.15": 5,
+    "1.16": 6,
+    "1.17": 7,
+    "1.18": 8,
+    "1.19": 9,
+    "1.20": 15,
+    "1.21": 18,
 }
 
 FLATTENING_REMAP = {
@@ -116,6 +126,7 @@ def convert_pack(src_path, base_version, target_version, original_filename=None)
     tmp = tempfile.mkdtemp()
     report = []
 
+    # Accept ANY upload: zip or folder-like
     if zipfile.is_zipfile(src_path):
         with zipfile.ZipFile(src_path, "r") as z:
             z.extractall(tmp)
@@ -165,53 +176,76 @@ async def send_file(interaction, file_path, filename, base_version=None, target_
     if base_version and target_version:
         message = f"✅ {interaction.user.mention}, the pack has successfully been converted from {base_version} to {target_version}"
 
+    # PRIVATE MODE → DM + ephemeral message
     if private_mode:
-        await interaction.followup.send(content=message, file=discord.File(file_path, filename=filename), ephemeral=True)
+        try:
+            await interaction.user.send(content=message, file=discord.File(file_path, filename=filename))
+            await interaction.followup.send("✅ File sent to your DMs.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send(
+                content=f"⚠ {interaction.user.mention}, I couldn't DM you. Only you can see this message.",
+                ephemeral=True
+            )
         return
 
+    # DM mode
     if send_in_dm:
         try:
             await interaction.user.send(content=message, file=discord.File(file_path, filename=filename))
             await interaction.followup.send("✅ File sent to your DMs.", ephemeral=True)
         except discord.Forbidden:
-            await interaction.followup.send(content=f"⚠ {interaction.user.mention}, DM failed. Sending here instead.", file=discord.File(file_path, filename=filename))
+            await interaction.followup.send(
+                content=f"⚠ {interaction.user.mention}, I couldn't DM you. Sending here instead.",
+                file=discord.File(file_path, filename=filename),
+            )
     else:
+        # Normal channel send
         await interaction.followup.send(content=message, file=discord.File(file_path, filename=filename))
 
 # =========================
 # SLASH COMMANDS
 # =========================
-async def handle_convert(interaction: discord.Interaction, pack: discord.Attachment, base_version: str, target_version: str):
+@bot.tree.command(name="convert", description="Upgrade a texture pack to a newer Minecraft version")
+@app_commands.describe(pack="Upload pack", base_version="Original version", target_version="Target version")
+async def convert(interaction: discord.Interaction, pack: discord.Attachment, base_version: str, target_version: str):
     await interaction.response.defer(thinking=True)
     src = tempfile.NamedTemporaryFile(delete=False)
     await pack.save(src.name)
     try:
-        result_path, output_filename = await asyncio.to_thread(convert_pack, src.name, base_version, target_version, pack.filename)
+        result_path, output_filename = convert_pack(src.name, base_version, target_version, pack.filename)
         await send_file(interaction, result_path, output_filename, base_version, target_version)
     finally:
         os.unlink(src.name)
 
-@bot.tree.command(name="convert", description="Upgrade a texture pack")
-@app_commands.describe(pack="Upload pack", base_version="Original version", target_version="Target version")
-async def convert(interaction: discord.Interaction, pack: discord.Attachment, base_version: str, target_version: str):
-    await handle_convert(interaction, pack, base_version, target_version)
-
-@bot.tree.command(name="downconvert", description="Downgrade a texture pack")
+@bot.tree.command(name="downconvert", description="Downgrade a texture pack to an older Minecraft version")
 @app_commands.describe(pack="Upload pack", base_version="Current version", target_version="Target older version")
 async def downconvert(interaction: discord.Interaction, pack: discord.Attachment, base_version: str, target_version: str):
-    await handle_convert(interaction, pack, base_version, target_version)
+    await interaction.response.defer(thinking=True)
+    src = tempfile.NamedTemporaryFile(delete=False)
+    await pack.save(src.name)
+    try:
+        result_path, output_filename = convert_pack(src.name, base_version, target_version, pack.filename)
+        await send_file(interaction, result_path, output_filename, base_version, target_version)
+    finally:
+        os.unlink(src.name)
 
 @bot.tree.command(name="toggle", description="Toggle sending files via DMs or channel")
 async def toggle(interaction: discord.Interaction):
     global send_in_dm
     send_in_dm = not send_in_dm
-    await interaction.response.send_message("✅ Files will now be sent to your DMs" if send_in_dm else "✅ Files will now be sent in the channel", ephemeral=True)
+    await interaction.response.send_message(
+        "✅ Files will now be sent to your DMs" if send_in_dm else "✅ Files will now be sent in the channel",
+        ephemeral=True,
+    )
 
 @bot.tree.command(name="ptoggle", description="Toggle private output (only you see the result)")
 async def ptoggle(interaction: discord.Interaction):
     global private_mode
     private_mode = not private_mode
-    await interaction.response.send_message("🔒 Private mode ON (ephemeral output)" if private_mode else "🔓 Private mode OFF", ephemeral=True)
+    await interaction.response.send_message(
+        "🔒 Private mode ON (ephemeral output)" if private_mode else "🔓 Private mode OFF",
+        ephemeral=True,
+    )
 
 # =========================
 # START
